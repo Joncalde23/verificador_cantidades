@@ -1,0 +1,117 @@
+
+import pdfplumber
+import pandas as pd
+
+#pdf_path = "fichas_tecnicas/PROFORMA.pdf"
+
+def pdf_proforma_a_excel(pdf_path: str, out_path: str):
+    """Extrae la tabla de una proforma PDF y la exporta a Excel."""
+
+    def is_money(token: str) -> bool:
+        t = token.replace(',', '')
+        if t.count('.') > 1:
+            return False
+        if not all(ch.isdigit() or ch == '.' for ch in t):
+            return False
+        if '.' in t:
+            dec = t.split('.')[-1]
+            if len(dec) != 2 or not dec.isdigit():
+                return False
+        return any(ch.isdigit() for ch in t)
+
+    def to_float_money(token: str) -> float:
+        return float(token.replace(',', ''))
+
+    def normalize_tokens(line: str):
+        parts = []
+        for tok in line.strip().split():
+            if is_money(tok):
+                parts.append(tok)
+                continue
+            split_done = False
+            for i, ch in enumerate(tok):
+                if ch.isdigit():
+                    sub = tok[i:]
+                    if all(c.isdigit() or c in ',.' for c in sub):
+                        tmp = sub.replace(',', '')
+                        if tmp.count('.') == 1:
+                            dec = tmp.split('.')[-1]
+                            if len(dec) == 2 and dec.isdigit():
+                                if tok[:i]:
+                                    parts.append(tok[:i])
+                                parts.append(sub)
+                                split_done = True
+                                break
+            if not split_done:
+                parts.append(tok)
+        return parts
+
+    def is_item_start(tokens):
+        return len(tokens) >= 3 and tokens[0].isdigit() and tokens[2].isdigit()
+
+    rows = []
+    current_item = None
+    current_ref = None
+    current_qty = None
+    current_desc_parts = []
+    current_started = False
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text() or ''
+            for raw_line in text.split('\n'):
+                tokens = normalize_tokens(raw_line)
+                if not tokens:
+                    continue
+
+                if is_item_start(tokens):
+                    current_item = tokens[0]
+                    current_ref = tokens[1]
+                    current_qty = tokens[2]
+                    current_desc_parts = []
+                    current_started = True
+                    remaining = tokens[3:]
+                    if remaining:
+                        if len(remaining) >= 2 and is_money(remaining[-1]) and is_money(remaining[-2]):
+                            desc = ' '.join(remaining[:-2]).strip()
+                            vr_unit = remaining[-2]
+                            vr_total = remaining[-1]
+                            rows.append([current_item, current_ref, current_qty, desc, vr_unit, vr_total])
+                            current_item = None
+                            current_ref = None
+                            current_qty = None
+                            current_desc_parts = []
+                            current_started = False
+                        else:
+                            current_desc_parts.append(' '.join(remaining))
+                    continue
+
+                if current_started:
+                    if len(tokens) >= 2 and is_money(tokens[-1]) and is_money(tokens[-2]):
+                        desc_part = ' '.join(tokens[:-2]).strip()
+                        if desc_part:
+                            current_desc_parts.append(desc_part)
+                        full_desc = ' '.join(p.strip() for p in current_desc_parts).strip()
+                        vr_unit = tokens[-2]
+                        vr_total = tokens[-1]
+                        rows.append([current_item, current_ref, current_qty, full_desc, vr_unit, vr_total])
+                        current_item = None
+                        current_ref = None
+                        current_qty = None
+                        current_desc_parts = []
+                        current_started = False
+                    else:
+                        current_desc_parts.append(' '.join(tokens))
+
+    columns = ['ITEM', 'REFERENCIA', 'CANTIDAD', 'DESCRIPCION', 'VR_UNITARIO', 'VR_TOTAL']
+    df = pd.DataFrame(rows, columns=columns)
+    df['ITEM'] = df['ITEM'].astype(int)
+    df['CANTIDAD'] = df['CANTIDAD'].astype(int)
+    df['VR_UNITARIO'] = df['VR_UNITARIO'].apply(to_float_money)
+    df['VR_TOTAL'] = df['VR_TOTAL'].apply(to_float_money)
+    df = df.sort_values('ITEM').reset_index(drop=True)
+    df.to_excel(out_path, index=False)
+    print(f"Archivo generado: {out_path} con {len(df)} filas")
+
+if __name__ == '__main__':
+    pdf_proforma_a_excel('fichas_tecnicas/PROFORMA.pdf', 'proforma_tabla_sin_regex_final.xlsx')
